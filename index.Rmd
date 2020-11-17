@@ -5,26 +5,213 @@ date: "14/11/2020"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+```{r setup, include=FALSE, cache=TRUE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center")
 ```
 
-## R Markdown
+## Overview
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. 
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+In this project, we will use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. Participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes. The data collected from acelerometers will then be used to predict the manner in which they did the exercise.
 
-```{r cars}
-summary(cars)
+This report describes how the data was preprocessed, how the models were built, and the results and validation steps taken to choose the final model. Finally, we will use the built model on a testing set.
+
+## Loading and Exploring the Dataset
+
+### Loading the Data
+
+This project uses the Weight Lifting Exercises Dataset, which may be accessed [here](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har). The following code will load the training and testing datasets into R. The training set will be used to train and validate the models, while the testing set will be used at the end to predict the manner in which the exercise was executed.
+
+```{r, cache=TRUE}
+trainUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testUrl  <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+trainFile<-"./data/pml-training.csv"
+testFile<-"./data/pml-testing.csv"
+
+if(!file.exists(trainFile))
+{
+    download.file(trainUrl,destfile = trainFile)
+}
+training <- read.csv(trainFile, stringsAsFactors = TRUE)
+if(!file.exists(testFile))
+{
+    download.file(testUrl,destfile = testFile)
+}
+testing  <- read.csv(testFile, stringsAsFactors = TRUE)
 ```
 
-## Including Plots
+### Splitting the Data
 
-You can also embed plots, for example:
+In order to perform a validation of the created models, first we will split the training dataset into a train and test set, with 70% and 30% of the data, respectively.
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r, cache=TRUE}
+library(caret)
+set.seed(1234)
+inTrain <- createDataPartition(y=training$classe,p=0.7, list=FALSE)
+trainSet <- training[inTrain,]
+testSet <- training[-inTrain,]
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r, cache=TRUE}
+dim(trainSet)
+dim(testSet)
+```
+
+## Variable Selection
+
+The `dim` function shows us that the dataset currently has 160 variables. Including all variables will make the model less effective because it may lead to overfitting and an increased variability in the predicted responses. Thus, the first step is to reduce the number of variables that will be used as predictors.
+
+First, we will remove the first 5 columns which will not be used as predictors: ID, timestamps, and user name. This reduced the number of variables from 160 to 155.
+
+```{r, cache=TRUE}
+trainSet <- trainSet[, -(1:5)]
+testSet <- testSet[, -(1:5)]
+```
+
+The next step is to remove variables that have near zero variablity, since this kind of variables are poor predictors. There are 57 variables that have a near-zero variability:
+
+```{r, cache=TRUE}
+nsv <- nearZeroVar(trainSet,saveMetrics=TRUE)
+nrow(nsv[(nsv$zeroVar==TRUE | nsv$nzv==TRUE),])
+head(nsv[(nsv$zeroVar==TRUE | nsv$nzv==TRUE),])
+```
+
+Now the number of variables is reduced to 98:
+
+```{r, cache=TRUE}
+trainSet <- trainSet[,!(nsv$zeroVar==TRUE | nsv$nzv==TRUE)]
+testSet <- testSet[,!(nsv$zeroVar==TRUE | nsv$nzv==TRUE)]
+dim(trainSet)
+dim(testSet)
+```
+Similarly, variables that have mostly NA values will not be very useful as predictors. The following code calculates the percentage of NA values for each variable, with 44 variables having more than 95% NA values:
+
+```{r, cache=TRUE}
+isna <- sapply(trainSet, function(x) mean(is.na(x)))
+sum(isna > 0.95)
+```
+Removing this 44 mostly-NA variables leaves us with a final dataset with 54 variables:
+
+```{r, cache=TRUE}
+trainSet <- trainSet[,!(isna > 0.95)]
+testSet <- testSet[,!(isna > 0.95)]
+dim(trainSet)
+dim(testSet)
+```
+Having gone through variable selection, the final dataset used to build the models will have 54 variables (53 predictors and the predicted variable).
+
+## Model Building
+
+This section describes the models that were trained to predict the manner in which the exercise was executed (*classe* variable) using the 53 selected variables as predictors. Three different models were trained: a decision tree, a random forest, and a GBM (generalized boosted model). A seed was set before building each model to ensure reproducibility.
+
+### Decision Tree
+
+A decision tree uses a sequence of branches based on variable values to break down the dataset into smaller and smaller subsets, which is then used to classify and predict a final value.
+
+```{r, cache=TRUE}
+set.seed(1445)
+modTree <- train(classe ~ ., method="rpart", data=trainSet)
+library(rattle)
+fancyRpartPlot(modTree$finalModel)
+```
+
+The image shows the calculated decision tree for this dataset. This model has an accuracy of 49.6% on the training set, which is not a very good accuracy.
+
+```{r, cache=TRUE}
+confusionMatrix(predict(modTree, trainSet), trainSet$classe)$overall[1]
+```
+
+### Random Forest
+
+The Random Forest model constructs and overlaps a multitude of trees and then predicts the value by taking the mean or mode of each tree. The model was tuned in order to reduce computing time.
+
+```{r, cache=TRUE}
+mtry <- sqrt(ncol(trainSet)-1)
+tunegrid <- expand.grid(.mtry=mtry)
+controlRF <- trainControl(method="repeatedcv", number=3, verboseIter=FALSE)
+set.seed(1445)
+modRF <- train(classe ~ ., data=trainSet, method="rf", trControl=controlRF, tuneGrid=tunegrid)
+```
+
+This model has an accuracy of 100% on the training set. This shows promise for the model, but is not an accurate prediction of the out of sample error, which will be calculated in the next section.
+
+```{r, cache=TRUE}
+confusionMatrix(predict(modRF, trainSet), trainSet$classe)$overall[1]
+```
+
+### Generalized Boosted Model (GBM)
+
+The generalized boosted model combines the decision tree and the boosting algorithm. It fits many decision trees in random subsets and improves accuracy by modifying weights on the input data. 
+
+```{r, cache=TRUE}
+set.seed(1445)
+modGBM <- train(classe ~ ., method="gbm", data=trainSet, verbose=FALSE)
+```
+
+This model has an accuracy of 99.3% on the training set. Again, this is not indicative of the out of sample error.
+
+```{r, cache=TRUE}
+confusionMatrix(predict(modGBM, trainSet), trainSet$classe)$overall[1]
+```
+
+## Model Accuracy
+
+This section will calculate the accuracy or out of sample error for each model. To do this, we will use each model on the test set and calculate the accuracy of the prediction.
+
+### Decision Tree
+
+The Decision Tree models has an out of sample accuracy of 49.4%, which means this is not a very good model.
+
+```{r, cache=TRUE}
+confusionMatrix(predict(modTree, testSet), testSet$classe)$overall[1]
+```
+```{r, cache=TRUE}
+confTree <- as.data.frame(confusionMatrix(predict(modTree, testSet), testSet$classe)$table)
+confTree$correct <- confTree$Prediction == confTree$Reference
+ggplot(aes(x=Reference, y=Prediction, fill=Freq, label = Freq),data=confTree) + geom_tile(aes(fill=Freq), color="black",size=0.1) + labs(x="Actual",y="Predicted", title = "Decision Tree Test Set Results") + geom_label(aes(color = correct)) + scale_fill_gradient(low="grey",high="green") + scale_colour_discrete(l = 40)
+```
+
+The plot shows the actual versus predicted values. This model predicts the "A" class well, but shows a lot of error for the other exercise classes.
+
+### Random Forest
+
+The Random Forest model has an out of sample accuracy of 99.7%. Notice that this is less than the accuracy for the training set, which is the norm for all trained models.
+
+```{r, cache=TRUE}
+confusionMatrix(predict(modRF, testSet), testSet$classe)$overall[1]
+```
+```{r, cache=TRUE}
+confTree <- as.data.frame(confusionMatrix(predict(modRF, testSet), testSet$classe)$table)
+confTree$correct <- confTree$Prediction == confTree$Reference
+ggplot(aes(x=Reference, y=Prediction, fill=Freq, label = Freq),data=confTree) + geom_tile(aes(fill=Freq), color="black",size=0.1) + labs(x="Actual",y="Predicted", title = "Random Forest Test Set Results") + geom_label(aes(color = correct)) + scale_fill_gradient(low="grey",high="green") + scale_colour_discrete(l = 40)
+```
+
+The plot shows a very accurate prediction for this model, with only 15 instances of getting a wrong prediction. All "A" and "E" classes were predicted correctly.
+
+### Generalized Boosted Model (GBM)
+
+The GBM model has an out of sample accuracy of 99.1%, just under the accuracy of the Random Forest model.
+
+```{r, cache=TRUE}
+confusionMatrix(predict(modGBM, testSet), testSet$classe)$overall[1]
+```
+```{r, cache=TRUE}
+confTree <- as.data.frame(confusionMatrix(predict(modGBM, testSet), testSet$classe)$table)
+confTree$correct <- confTree$Prediction == confTree$Reference
+ggplot(aes(x=Reference, y=Prediction, fill=Freq, label = Freq),data=confTree) + geom_tile(aes(fill=Freq), color="black",size=0.1) + labs(x="Actual",y="Predicted", title = "GBM Test Set Results") + geom_label(aes(color = correct)) + scale_fill_gradient(low="grey",high="green") + scale_colour_discrete(l = 40)
+```
+
+The plot shows a very accurate prediction for this model, although it is less accurate than the Random Forest model.
+
+## Results
+
+The Random Forest model had the best results, with an out of sample accuracy of 99.7%. This is the model that will be used on the initial testing set to predict the manner in which the subjects did the exercise. The following code will show the model's predicted values:
+
+```{r, cache=TRUE}
+predict(modRF, newdata = testing)
+```
+
+
+
+
